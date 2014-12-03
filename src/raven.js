@@ -383,8 +383,10 @@ function parseDSN(str) {
         throw new RavenConfigError('Invalid DSN: ' + str);
     }
 
+    /*
     if (dsn.pass)
         throw new RavenConfigError('Do not specify your private key in the DSN!');
+    */
 
     return dsn;
 }
