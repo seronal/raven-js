@@ -1,5 +1,49 @@
 'use strict';
 
+/*
+ * Default transport.
+ * */
+var HTTPGetTransport = {
+    setup: function(dsn, triggerEvent){
+        if (dsn.pass)
+            throw new RavenConfigError('Do not specify your private key in the DSN!');
+        this.dsn = dsn;
+        this.triggerEvent = triggerEvent;
+    },
+    send: function(data, endpoint){
+        var img = new Image(),
+            triggerEvent = this.triggerEvent,
+            src = endpoint + this.getAuthQueryString() + '&sentry_data=' + encodeURIComponent(JSON.stringify(data));
+
+        img.onload = function success() {
+            triggerEvent('success', {
+                data: data,
+                src: src
+            });
+        };
+        img.onerror = img.onabort = function failure() {
+            triggerEvent('failure', {
+                data: data,
+                src: src
+            });
+        };
+        img.src = src;
+    },
+
+    getAuthQueryString: function() {
+        if (this.cachedAuth) return this.cachedAuth;
+        var qs = [
+            'sentry_version=4',
+            'sentry_client=raven-js/' + Raven.VERSION
+        ];
+        if (globalKey) {
+            qs.push('sentry_key=' + this.dsn.user);
+        }
+        this.cachedAuth = '?' + qs.join('&');
+        return this.cachedAuth;
+    }
+};
+
 // First, check for JSON support
 // If there is no JSON, we no-op the core features of Raven
 // since JSON is required to encode the payload
@@ -11,6 +55,8 @@ var _Raven = window.Raven,
     globalUser,
     globalKey,
     globalProject,
+    globalTransports = { 'default': HTTPGetTransport },
+    globalTransport = null,
     globalOptions = {
         logger: 'javascript',
         ignoreErrors: [],
@@ -27,6 +73,7 @@ var _Raven = window.Raven,
 
     objectPrototype = Object.prototype,
     startTime = now();
+
 
 /*
  * The core Raven singleton
@@ -94,7 +141,9 @@ var Raven = {
                       '/' + path + 'api/' + globalProject + '/store/';
 
         if (uri.protocol) {
-            globalServer = uri.protocol + ':' + globalServer;
+            // Only use the first part of the url if it contains
+            // a plugin identifier, e.g  https+post -> https
+            globalServer = uri.protocol.split('+')[0] + ':' + globalServer;
         }
 
         if (globalOptions.fetchContext) {
@@ -107,7 +156,12 @@ var Raven = {
 
         TraceKit.collectWindowErrors = !!globalOptions.collectWindowErrors;
 
-        setAuthQueryString();
+        globalTransport = uri.protocol && globalTransports[uri.protocol] ? globalTransports[uri.protocol] : globalTransports['default'];
+
+        // Allow transports to fall back to other transport protocols,
+        // if the chosen one isn't supported
+        var transport = globalTransport.setup(uri, triggerEvent);
+        globalTransport = transport ? transport : globalTransport;
 
         // return for chaining
         return Raven;
@@ -127,6 +181,23 @@ var Raven = {
             isRavenInstalled = true;
         }
 
+        return Raven;
+    },
+
+
+
+    /*
+     * Register a transport plugin for pushing data into Sentry.
+     * Transport plugins are chosen based upon the DSN passed into Raven.configure,
+     * e.g Raven.configure('http://...') will use the plugin registered for 'http'.
+     *
+     * @param {string} protocol A protocol identifier in the DSN, e.g http or https+post
+     * @param {object} transport An implementation of the transport. Must implement the `setup(dsn)` and `send(data, endpoint)` methods.
+     */
+    registerTransport: function(protocol, transport){
+        if(globalTransports[protocol]) throw new RavenConfigError('Protocol ' + protocol + ' already has a registered transport method');
+
+        globalTransports[protocol] = transport;
         return Raven;
     },
 
@@ -376,7 +447,7 @@ function triggerEvent(eventType, options) {
 }
 
 var dsnKeys = 'source protocol user pass host port path'.split(' '),
-    dsnPattern = /^(?:(\w+):)?\/\/(\w+)(:\w+)?@([\w\.-]+)(?::(\d+))?(\/.*)/;
+    dsnPattern = /^(?:(\w+|\w+\+\w+)?:)?\/\/(\w+)(?::(\w+))?@([\w\.-]+)(?::(\d+))?(\/.*)/;
 
 function RavenConfigError(message) {
     this.name = 'RavenConfigError';
@@ -389,16 +460,13 @@ RavenConfigError.prototype.constructor = RavenConfigError;
 function parseDSN(str) {
     var m = dsnPattern.exec(str),
         dsn = {},
-        i = 7;
+        i = dsnKeys.length;
 
     try {
         while (i--) dsn[dsnKeys[i]] = m[i] || '';
     } catch(e) {
         throw new RavenConfigError('Invalid DSN: ' + str);
     }
-
-    if (dsn.pass)
-        throw new RavenConfigError('Do not specify your private key in the DSN!');
 
     return dsn;
 }
@@ -461,15 +529,6 @@ function each(obj, callback) {
         }
     }
 }
-
-
-function setAuthQueryString() {
-    authQueryString =
-        '?sentry_version=4' +
-        '&sentry_client=raven-js/' + Raven.VERSION +
-        '&sentry_key=' + globalKey;
-}
-
 
 function handleStackInfo(stackInfo, options) {
     var frames = [];
@@ -702,23 +761,7 @@ function send(data) {
 
 
 function makeRequest(data) {
-    var img = new Image(),
-        src = globalServer + authQueryString + '&sentry_data=' + encodeURIComponent(JSON.stringify(data));
-
-    img.crossOrigin = 'anonymous';
-    img.onload = function success() {
-        triggerEvent('success', {
-            data: data,
-            src: src
-        });
-    };
-    img.onerror = img.onabort = function failure() {
-        triggerEvent('failure', {
-            data: data,
-            src: src
-        });
-    };
-    img.src = src;
+    globalTransport.send(data, globalServer);
 }
 
 function isSetup() {
